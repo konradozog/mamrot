@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+.env
+*.spec
+*.log
+.flet/
+.claude/
+docs/
+tests/
+*.code-workspace
