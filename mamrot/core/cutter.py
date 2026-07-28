@@ -172,8 +172,6 @@ class CutterEngine:
         on_job_done: Optional[Callable[[CutJob, int], None]] = None,
         on_job_error: Optional[Callable[[CutJob, int, str], None]] = None,
         on_all_done: Optional[Callable[[int, int], None]] = None,
-        offset_start_ms: float = 0,
-        offset_end_ms: float = 0,
     ) -> None:
         """Process all queued jobs in a background thread."""
 
@@ -202,11 +200,9 @@ class CutterEngine:
                         clean_label, adj_start, adj_end = _apply_padding(
                             job.label, job.start, job.end,
                         )
-                        # Use per-job offsets first, fall back to global
-                        off_s = job.offset_start_ms if job.offset_start_ms else offset_start_ms
-                        off_e = job.offset_end_ms if job.offset_end_ms else offset_end_ms
-                        adj_start = max(0.0, adj_start + off_s / 1000)
-                        adj_end = adj_end + off_e / 1000
+                        # Per-job offsets only — must match what preview plays
+                        adj_start = max(0.0, adj_start + job.offset_start_ms / 1000)
+                        adj_end = adj_end + job.offset_end_ms / 1000
 
                         # Generate output filename from label (first few words)
                         slug = _slugify(clean_label) if clean_label else f"clip_{i+1}"

@@ -488,8 +488,8 @@ class CutterTab(QWidget):
             return
         job = self.engine.queue[row]
         self.btn_stop.setEnabled(True)
-        off_s = self.offset_start_spin.value()
-        off_e = self.offset_end_spin.value()
+        off_s = job.offset_start_ms
+        off_e = job.offset_end_ms
         _, adj_s, adj_e = _apply_padding(job.label, job.start, job.end)
         adj_s = max(0.0, adj_s + off_s / 1000.0)
         adj_e = adj_e + off_e / 1000.0
@@ -522,8 +522,8 @@ class CutterTab(QWidget):
             self.preview_label.setText("")
             return
         job = self.engine.queue[idx.row()]
-        off_s = self.offset_start_spin.value()
-        off_e = self.offset_end_spin.value()
+        off_s = job.offset_start_ms
+        off_e = job.offset_end_ms
         _, adj_s, adj_e = _apply_padding(job.label, job.start, job.end)
         adj_s = max(0.0, adj_s + off_s / 1000.0)
         adj_e = adj_e + off_e / 1000.0
@@ -569,8 +569,6 @@ class CutterTab(QWidget):
             on_job_done=on_done,
             on_job_error=on_error,
             on_all_done=on_all_done,
-            offset_start_ms=self.offset_start_spin.value(),
-            offset_end_ms=self.offset_end_spin.value(),
         )
 
     def _ui_job_start(self, i, total):

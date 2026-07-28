@@ -646,7 +646,9 @@ class EditorTab(QWidget):
                 jobs.append(CutJob(
                     source_path=self._source_path,
                     start=seg.start, end=seg.end,
-                    label=seg.text.strip()[:80],
+                    # Full text: ^ padding markers are parsed from the label at
+                    # cut time, truncation would silently drop trailing markers
+                    label=seg.text.strip(),
                     offset_start_ms=off_s,
                     offset_end_ms=off_e,
                 ))
@@ -898,6 +900,7 @@ class EditorTab(QWidget):
     def _do_merge_prev(self, row: int, reopen_editor: bool = True):
         new_row = self._model.merge_with_previous(row)
         if new_row is not None:
+            self._remap_offsets_after_merge(new_row)
             self._update_summary()
             if reopen_editor:
                 QTimer.singleShot(0, lambda: self._focus_and_edit(new_row))
@@ -908,12 +911,46 @@ class EditorTab(QWidget):
     def _do_merge_next(self, row: int, reopen_editor: bool = True):
         new_row = self._model.merge_with_next(row)
         if new_row is not None:
+            self._remap_offsets_after_merge(new_row)
             self._update_summary()
             if reopen_editor:
                 QTimer.singleShot(0, lambda: self._focus_and_edit(new_row))
             else:
                 self.table.setCurrentIndex(
                     self._model.index(new_row, SegmentTableModel.COL_TEXT))
+
+    def _remap_offsets_after_merge(self, a: int):
+        """Rows (a, a+1) merged into a: keep a's start offset and a+1's end offset."""
+        old = self._row_offsets
+        merged = (old.get(a, (0, 0))[0], old.get(a + 1, (0, 0))[1])
+        remapped = {}
+        for r, off in old.items():
+            if r < a:
+                remapped[r] = off
+            elif r > a + 1:
+                remapped[r - 1] = off
+        if merged != (0, 0):
+            remapped[a] = merged
+        self._row_offsets = remapped
+        # Model already rebuilt the queue with stale offsets — rebuild again
+        self.jobs_changed.emit()
+
+    def _remap_offsets_after_split(self, row: int):
+        """Row split into (row, row+1): start offset stays, end offset moves down."""
+        old = self._row_offsets
+        s, e = old.get(row, (0, 0))
+        remapped = {}
+        for r, off in old.items():
+            if r < row:
+                remapped[r] = off
+            elif r > row:
+                remapped[r + 1] = off
+        if s:
+            remapped[row] = (s, 0)
+        if e:
+            remapped[row + 1] = (0, e)
+        self._row_offsets = remapped
+        self.jobs_changed.emit()
 
     # ── Split ────────────────────────────────────────
 
@@ -928,6 +965,7 @@ class EditorTab(QWidget):
         self.table.closePersistentEditor(self.table.currentIndex())
         new_row = self._model.split_segment(row, word_idx)
         if new_row is not None:
+            self._remap_offsets_after_split(row)
             QTimer.singleShot(0, lambda: self._focus_and_edit(new_row))
             self._update_summary()
 
@@ -1022,6 +1060,8 @@ class EditorTab(QWidget):
                 self.offset_start_spin.value(),
                 self.offset_end_spin.value(),
             )
+            # Rebuild the cutter queue so queued jobs pick up the new offsets
+            self.jobs_changed.emit()
         self._update_preview_label()
 
     def _update_preview_label(self):
