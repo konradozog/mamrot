@@ -13,7 +13,6 @@ venv/
 .claude/
 docs/
 tests/
-*.code-workspace
 CLAUDE.md
 .pytest_cache/
 Thumbs.db
