@@ -90,6 +90,7 @@ class MamrotWindow(QMainWindow):
         self.transcribe_tab.transcription_done.connect(self._on_transcription_done)
         self.editor_tab.jobs_changed.connect(self._on_editor_jobs_changed)
         self.editor_tab.go_to_cutter.connect(lambda: self.tabs.setCurrentIndex(2))
+        self.cutter_tab.offsets_edited.connect(self.editor_tab.apply_offsets_for_range)
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
     def _on_transcription_done(self, job: TranscribeJob):
@@ -100,12 +101,25 @@ class MamrotWindow(QMainWindow):
         # Don't rebuild while cutter is processing
         if self.cutter.is_running:
             return
-        # Don't rebuild if there are done jobs (cutter just finished)
-        if any(j.status == "done" for j in self.cutter.queue):
-            return
+
+        fresh = self.editor_tab.get_cut_jobs()
+        fresh_keys = {_job_key(j) for j in fresh}
+        # Finished jobs survive only while the editor still describes them
+        # exactly; change an offset and the segment is re-armed for cutting
+        # instead of being frozen at what was cut before.
+        kept = [
+            j for j in self.cutter.queue
+            if j.status != "queued" and _job_key(j) in fresh_keys
+        ]
+        kept_keys = {_job_key(j) for j in kept}
+
         self.cutter.clear_all()
-        for cut_job in self.editor_tab.get_cut_jobs():
-            self.cutter.add(cut_job)
+        for job in kept:
+            self.cutter.add(job)
+        for job in fresh:
+            if _job_key(job) not in kept_keys:
+                self.cutter.add(job)
+        self.cutter_tab.refresh()
 
     def _on_tab_changed(self, index: int):
         if index == 2:
@@ -125,6 +139,14 @@ class MamrotWindow(QMainWindow):
         self.editor_tab._preview.stop()
         self.cutter_tab._preview.stop()
         super().closeEvent(event)
+
+
+def _job_key(job):
+    """Identity of a cut: same segment, same text, same offsets."""
+    return (
+        job.source_path, round(job.start, 3), round(job.end, 3),
+        job.label, job.offset_start_ms, job.offset_end_ms,
+    )
 
 
 class _FFmpegDownloadWorker(QObject):

@@ -14,7 +14,7 @@ from PySide6.QtCore import QEvent
 from PySide6.QtGui import QColor
 
 from ..core.models import CutJob, fmt_ts
-from ..core.cutter import CutterEngine, OUTPUT_FORMATS, _apply_padding, _slugify
+from ..core.cutter import CutterEngine, OUTPUT_FORMATS, job_range, _slugify
 from .theme import (
     ACCENT, ACCENT_LIGHT, TEXT, TEXT2, TEXT3,
     SUCCESS, ERROR, ELEVATED, SELECTED_BG,
@@ -84,9 +84,10 @@ class QueueTableModel(QAbstractTableModel):
             if col == self.COL_IDX:
                 return str(row + 1)
             elif col == self.COL_RANGE:
-                return f"{fmt_ts(job.start)} -> {fmt_ts(job.end)}"
+                _, adj_s, adj_e = job_range(job)
+                return f"{fmt_ts(adj_s)} -> {fmt_ts(adj_e)}"
             elif col == self.COL_DUR:
-                _, adj_s, adj_e = _apply_padding(job.label, job.start, job.end)
+                _, adj_s, adj_e = job_range(job)
                 return f"{adj_e - adj_s:.1f}s"
             elif col == self.COL_LABEL:
                 return job.label[:80]
@@ -108,6 +109,10 @@ class QueueTableModel(QAbstractTableModel):
             return QColor(TEXT_PRIMARY)
 
         elif role == Qt.ToolTipRole:
+            if col == self.COL_RANGE:
+                return (f"Segment: {fmt_ts(job.start)} -> {fmt_ts(job.end)}\n"
+                        f"Offsets: {job.offset_start_ms:+.0f} / "
+                        f"{job.offset_end_ms:+.0f} ms")
             if col == self.COL_LABEL:
                 return f"{os.path.basename(job.source_path)}\n{job.label}"
             if col == self.COL_STATUS and job.status == "error":
@@ -140,6 +145,9 @@ class CutterTab(QWidget):
     _sig_job_done = Signal(int)         # (job_index,)
     _sig_job_error = Signal(int, str)   # (job_index, error)
     _sig_all_done = Signal(int, int)    # (done_count, error_count)
+
+    # (source_path, seg_start, seg_end, offset_start_ms, offset_end_ms)
+    offsets_edited = Signal(str, float, float, float, float)
 
     def __init__(self, engine: CutterEngine, parent=None):
         super().__init__(parent)
@@ -289,7 +297,9 @@ class CutterTab(QWidget):
         self.offset_start_spin.setSuffix(" ms")
         self.offset_start_spin.setValue(0)
         self.offset_start_spin.setFixedWidth(110)
-        self.offset_start_spin.setToolTip("Shift cut start (negative = earlier)")
+        self.offset_start_spin.setToolTip(
+            "Shift cut start (negative = earlier), on top of the "
+            "built-in 60 ms pre-roll")
         end_lbl = QLabel("End:")
         end_lbl.setStyleSheet(f"color: {TEXT3}; font-size: 11px;")
         self.offset_end_spin = QSpinBox()
@@ -298,7 +308,9 @@ class CutterTab(QWidget):
         self.offset_end_spin.setSuffix(" ms")
         self.offset_end_spin.setValue(0)
         self.offset_end_spin.setFixedWidth(110)
-        self.offset_end_spin.setToolTip("Shift cut end (negative = shorter)")
+        self.offset_end_spin.setToolTip(
+            "Shift cut end (negative = shorter), on top of the "
+            "built-in 150 ms tail")
 
         footer_layout.addWidget(self.btn_preview)
         footer_layout.addWidget(self.btn_stop)
@@ -379,6 +391,7 @@ class CutterTab(QWidget):
 
     def refresh(self):
         self._queue_model.refresh()
+        self._sync_offset_controls()
         self._update_queue_count()
         self._check_ready()
 
@@ -453,18 +466,29 @@ class CutterTab(QWidget):
         if index.isValid():
             self._preview_row(index.row())
 
+    def _current_job(self):
+        idx = self.table.currentIndex()
+        if not idx.isValid() or idx.row() >= len(self.engine.queue):
+            return None
+        return self.engine.queue[idx.row()]
+
+    def _sync_offset_controls(self):
+        """Spinboxes are a view of the current job - never a stale value.
+
+        Disabled without a current job, so an offset can never sit in a
+        spinbox while belonging to nothing.
+        """
+        job = self._current_job()
+        self._syncing_offsets = True
+        self.offset_start_spin.setEnabled(job is not None)
+        self.offset_end_spin.setEnabled(job is not None)
+        self.offset_start_spin.setValue(int(job.offset_start_ms) if job else 0)
+        self.offset_end_spin.setValue(int(job.offset_end_ms) if job else 0)
+        self._syncing_offsets = False
+
     def _on_row_changed(self, current, previous):
         """Load per-job offsets into spinboxes."""
-        if not current.isValid():
-            return
-        row = current.row()
-        if row >= len(self.engine.queue):
-            return
-        job = self.engine.queue[row]
-        self._syncing_offsets = True
-        self.offset_start_spin.setValue(int(job.offset_start_ms))
-        self.offset_end_spin.setValue(int(job.offset_end_ms))
-        self._syncing_offsets = False
+        self._sync_offset_controls()
         self._update_preview_label()
 
     def _on_offset_changed(self):
@@ -472,10 +496,19 @@ class CutterTab(QWidget):
         if self._syncing_offsets:
             return
         idx = self.table.currentIndex()
-        if idx.isValid() and idx.row() < len(self.engine.queue):
-            job = self.engine.queue[idx.row()]
-            job.offset_start_ms = self.offset_start_spin.value()
-            job.offset_end_ms = self.offset_end_spin.value()
+        job = self._current_job()
+        if job is None:
+            self._sync_offset_controls()
+            return
+        job.offset_start_ms = self.offset_start_spin.value()
+        job.offset_end_ms = self.offset_end_spin.value()
+        self._queue_model.refresh_row(idx.row())
+        # The editor owns the offsets; without this the next queue rebuild
+        # would drop what was just tuned here.
+        self.offsets_edited.emit(
+            job.source_path, job.start, job.end,
+            job.offset_start_ms, job.offset_end_ms,
+        )
         self._update_preview_label()
 
     def _preview_current(self):
@@ -490,9 +523,7 @@ class CutterTab(QWidget):
         self.btn_stop.setEnabled(True)
         off_s = job.offset_start_ms
         off_e = job.offset_end_ms
-        _, adj_s, adj_e = _apply_padding(job.label, job.start, job.end)
-        adj_s = max(0.0, adj_s + off_s / 1000.0)
-        adj_e = adj_e + off_e / 1000.0
+        _, adj_s, adj_e = job_range(job)
         self.preview_label.setText(
             f"Playing: {fmt_ts(adj_s)} → {fmt_ts(adj_e)} ({adj_e - adj_s:.1f}s)"
         )
@@ -522,11 +553,7 @@ class CutterTab(QWidget):
             self.preview_label.setText("")
             return
         job = self.engine.queue[idx.row()]
-        off_s = job.offset_start_ms
-        off_e = job.offset_end_ms
-        _, adj_s, adj_e = _apply_padding(job.label, job.start, job.end)
-        adj_s = max(0.0, adj_s + off_s / 1000.0)
-        adj_e = adj_e + off_e / 1000.0
+        _, adj_s, adj_e = job_range(job)
         self.preview_label.setText(
             f"{fmt_ts(adj_s)} → {fmt_ts(adj_e)} ({adj_e - adj_s:.1f}s)"
         )

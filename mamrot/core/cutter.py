@@ -50,12 +50,14 @@ def _apply_padding(text: str, start: float, end: float):
     """Apply default padding + parse ^ markers from text.
 
     Default: 60ms before start, 150ms after end (compensates whisper).
+    Text is stripped first, so surrounding whitespace can never hide a
+    marker from one caller while another (working on stripped text) sees it.
     Trailing ^ are stripped first, then leading ^.
     Each trailing ^: adds 300ms after end.
     Each leading ^: adds 300ms before start.
     Returns (clean_text, adjusted_start, adjusted_end).
     """
-    clean = text
+    clean = text.strip()
     # Count and strip trailing ^
     end_pad = 0
     while clean.endswith("^"):
@@ -70,6 +72,32 @@ def _apply_padding(text: str, start: float, end: float):
     adj_start = max(0.0, start - _DEFAULT_PAD_START_MS / 1000 - start_pad * _PAD_PER_MARKER_MS / 1000)
     adj_end = end + _DEFAULT_PAD_END_MS / 1000 + end_pad * _PAD_PER_MARKER_MS / 1000
     return clean.strip(), adj_start, adj_end
+
+
+def resolve_range(
+    text: str,
+    start: float,
+    end: float,
+    offset_start_ms: float = 0,
+    offset_end_ms: float = 0,
+):
+    """Effective cut range: default padding + ^ markers + manual offsets.
+
+    Single source of truth — preview, table labels and the actual cut all
+    go through this, so what the UI shows is always what ffmpeg receives.
+    Returns (clean_text, adjusted_start, adjusted_end).
+    """
+    clean, adj_start, adj_end = _apply_padding(text, start, end)
+    adj_start = max(0.0, adj_start + offset_start_ms / 1000)
+    adj_end = adj_end + offset_end_ms / 1000
+    return clean, adj_start, adj_end
+
+
+def job_range(job: CutJob):
+    """Effective (clean_label, start, end) of a queued job."""
+    return resolve_range(
+        job.label, job.start, job.end, job.offset_start_ms, job.offset_end_ms,
+    )
 
 
 OUTPUT_FORMATS = {
@@ -196,13 +224,9 @@ class CutterEngine:
                         on_job_start(job, i)
 
                     try:
-                        # Apply ^ padding markers from label
-                        clean_label, adj_start, adj_end = _apply_padding(
-                            job.label, job.start, job.end,
-                        )
-                        # Per-job offsets only — must match what preview plays
-                        adj_start = max(0.0, adj_start + job.offset_start_ms / 1000)
-                        adj_end = adj_end + job.offset_end_ms / 1000
+                        # ^ padding markers + per-job offsets, resolved
+                        # exactly like preview and the UI labels
+                        clean_label, adj_start, adj_end = job_range(job)
 
                         # Generate output filename from label (first few words)
                         slug = _slugify(clean_label) if clean_label else f"clip_{i+1}"

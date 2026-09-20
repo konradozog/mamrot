@@ -19,7 +19,7 @@ Powered by **faster-whisper** + **ffmpeg**, wrapped in a **PySide6** (Qt6) inter
 - **Smart selection** — click segments to queue for cutting, select all search matches at once, contiguous ranges auto-grouped
 - **Audio cutter** — selected segments → cutter queue → batch export (WAV, FLAC, MP3, OGG, AAC, Opus)
 - **Audio preview** — play segment audio before cutting, with per-segment offset control
-- **Padding system** — default padding + `^` markers for fine-tuning cut boundaries
+- **Padding system** — every cut gets 60 ms before and 150 ms after the segment by default; `^` markers add 300 ms per marker and per-segment offsets shift either edge on top of that. Editor, preview and export always resolve to the same range
 - **GPU & CPU** — CUDA with float16 or CPU with int8, auto-detected
 
 ## Requirements

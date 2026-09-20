@@ -14,7 +14,7 @@ from PySide6.QtCore import QEvent
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
 
 from ..core.models import Segment, Word, TranscribeJob, CutJob, fmt_ts, load_transcript_json
-from ..core.cutter import _apply_padding
+from ..core.cutter import resolve_range
 from .transcribe_tab import _load_last_input_dir, _save_last_input_dir
 
 _RECENT_CONFIG = os.path.join(os.path.expanduser("~"), ".mamrot", "recent_transcripts.json")
@@ -67,6 +67,12 @@ class SegmentTableModel(QAbstractTableModel):
         self._selected: Set[int] = set()  # indices of queued segments
         self._search_query: str = ""
         self._search_matches: Set[int] = set()
+        # Filled in by EditorTab: row -> (offset_start_ms, offset_end_ms)
+        self._offsets_for_row = lambda row: (0, 0)
+
+    def set_offset_provider(self, provider):
+        """Row offsets live in EditorTab; the model only reads them."""
+        self._offsets_for_row = provider
 
     # ── Qt model interface ─────────────────────────────
 
@@ -96,7 +102,7 @@ class SegmentTableModel(QAbstractTableModel):
             elif col == self.COL_TEXT:
                 return seg.text.strip()
             elif col == self.COL_DUR:
-                _, adj_s, adj_e = _apply_padding(seg.text, seg.start, seg.end)
+                _, adj_s, adj_e = self.effective_range(row)
                 return f"{adj_e - adj_s:.1f}s"
             elif col == self.COL_QUEUED:
                 return None  # handled by CheckStateRole
@@ -127,8 +133,8 @@ class SegmentTableModel(QAbstractTableModel):
 
         elif role == Qt.ToolTipRole:
             if col == self.COL_DUR:
-                _, adj_s, adj_e = _apply_padding(seg.text, seg.start, seg.end)
-                return f"Padded: {fmt_ts(adj_s)} → {fmt_ts(adj_e)}"
+                _, adj_s, adj_e = self.effective_range(row)
+                return f"Cut: {fmt_ts(adj_s)} → {fmt_ts(adj_e)}"
             if col == self.COL_TEXT:
                 return f"{fmt_ts(seg.start)} → {fmt_ts(seg.end)}"
 
@@ -187,6 +193,12 @@ class SegmentTableModel(QAbstractTableModel):
         self._search_query = ""
         self.endResetModel()
         self.segments_changed.emit()
+
+    def effective_range(self, row: int):
+        """Range that would actually be cut for this row (padding + offsets)."""
+        seg = self._segments[row]
+        off_s, off_e = self._offsets_for_row(row)
+        return resolve_range(seg.text, seg.start, seg.end, off_s, off_e)
 
     def segment_at(self, row: int) -> Optional[Segment]:
         if 0 <= row < len(self._segments):
@@ -535,14 +547,16 @@ class EditorTab(QWidget):
         self.offset_start_spin.setSuffix(" ms")
         self.offset_start_spin.setValue(0)
         self.offset_start_spin.setFixedWidth(110)
-        self.offset_start_spin.setToolTip("Shift start time (ms)")
+        self.offset_start_spin.setToolTip(
+            "Shift start (ms), on top of the built-in 60 ms pre-roll")
         self.offset_end_spin = QSpinBox()
         self.offset_end_spin.setRange(-2000, 2000)
         self.offset_end_spin.setSingleStep(100)
         self.offset_end_spin.setSuffix(" ms")
         self.offset_end_spin.setValue(0)
         self.offset_end_spin.setFixedWidth(110)
-        self.offset_end_spin.setToolTip("Shift end time (ms)")
+        self.offset_end_spin.setToolTip(
+            "Shift end (ms), on top of the built-in 150 ms tail")
 
         preview_row.addWidget(self.btn_preview)
         preview_row.addWidget(self.btn_stop)
@@ -615,6 +629,8 @@ class EditorTab(QWidget):
         # Intercept key events on the table
         self.table.installEventFilter(self)
         self.table.selectionModel().currentRowChanged.connect(self._on_row_changed)
+        self._model.set_offset_provider(self._offsets_for_row)
+        self._sync_offset_controls()
 
         # Keyboard shortcuts
         QShortcut(QKeySequence("Ctrl+F"), self, self.search_field.setFocus)
@@ -642,7 +658,7 @@ class EditorTab(QWidget):
         for row in sorted(self._model.selected_rows):
             seg = self._model.segment_at(row)
             if seg:
-                off_s, off_e = self._row_offsets.get(row, (0, 0))
+                off_s, off_e = self._offsets_for_row(row)
                 jobs.append(CutJob(
                     source_path=self._source_path,
                     start=seg.start, end=seg.end,
@@ -780,6 +796,7 @@ class EditorTab(QWidget):
         for i, s in enumerate(segments):
             s.idx = i
         self._model.set_segments(segments)
+        self._sync_offset_controls()
         self._update_summary()
         self._update_selection_info()
 
@@ -932,6 +949,7 @@ class EditorTab(QWidget):
         if merged != (0, 0):
             remapped[a] = merged
         self._row_offsets = remapped
+        self._sync_offset_controls()
         # Model already rebuilt the queue with stale offsets — rebuild again
         self.jobs_changed.emit()
 
@@ -950,6 +968,7 @@ class EditorTab(QWidget):
         if e:
             remapped[row + 1] = (0, e)
         self._row_offsets = remapped
+        self._sync_offset_controls()
         self.jobs_changed.emit()
 
     # ── Split ────────────────────────────────────────
@@ -1009,11 +1028,8 @@ class EditorTab(QWidget):
         if not seg or not self._source_path:
             return
         self.btn_stop.setEnabled(True)
-        off_s = self.offset_start_spin.value()
-        off_e = self.offset_end_spin.value()
-        _, adj_s, adj_e = _apply_padding(seg.text, seg.start, seg.end)
-        adj_s = max(0.0, adj_s + off_s / 1000.0)
-        adj_e = adj_e + off_e / 1000.0
+        off_s, off_e = self._offsets_for_row(row)
+        _, adj_s, adj_e = resolve_range(seg.text, seg.start, seg.end, off_s, off_e)
         self.preview_label.setText(
             f"Playing: {fmt_ts(adj_s)} → {fmt_ts(adj_e)} ({adj_e - adj_s:.1f}s)"
         )
@@ -1037,32 +1053,79 @@ class EditorTab(QWidget):
         self.btn_stop.setEnabled(False)
         self._update_preview_label()
 
-    def _on_row_changed(self, current, previous):
-        """Load per-row offsets into spinboxes when row changes."""
-        if not current.isValid():
-            return
-        row = current.row()
-        off_s, off_e = self._row_offsets.get(row, (0, 0))
+    def _offsets_for_row(self, row: int):
+        """Stored offsets of a row - what preview, labels and cuts all use."""
+        return self._row_offsets.get(row, (0, 0))
+
+    def _current_row(self) -> Optional[int]:
+        idx = self.table.currentIndex()
+        return idx.row() if idx.isValid() else None
+
+    def _sync_offset_controls(self):
+        """Spinboxes are a view of the current row's stored offsets.
+
+        Without a current row there is nothing to attach an offset to, so the
+        spinboxes are disabled instead of holding a value that would silently
+        never reach the cut.
+        """
+        row = self._current_row()
+        off_s, off_e = self._offsets_for_row(row) if row is not None else (0, 0)
         self._syncing_offsets = True
+        self.offset_start_spin.setEnabled(row is not None)
+        self.offset_end_spin.setEnabled(row is not None)
         self.offset_start_spin.setValue(int(off_s))
         self.offset_end_spin.setValue(int(off_e))
         self._syncing_offsets = False
+
+    def _on_row_changed(self, current, previous):
+        """Load per-row offsets into spinboxes when row changes."""
+        self._sync_offset_controls()
         self._update_preview_label()
 
     def _on_offset_changed(self):
         """Save offset values to current row."""
         if self._syncing_offsets:
             return
-        current = self.table.currentIndex()
-        if current.isValid():
-            row = current.row()
-            self._row_offsets[row] = (
-                self.offset_start_spin.value(),
-                self.offset_end_spin.value(),
-            )
-            # Rebuild the cutter queue so queued jobs pick up the new offsets
-            self.jobs_changed.emit()
+        row = self._current_row()
+        if row is None:
+            # Nothing selected - refuse the value instead of keeping a spinbox
+            # that shows an offset no cut would ever apply.
+            self._sync_offset_controls()
+            return
+        off = (self.offset_start_spin.value(), self.offset_end_spin.value())
+        if off == (0, 0):
+            self._row_offsets.pop(row, None)
+        else:
+            self._row_offsets[row] = off
+        self._refresh_row_duration(row)
+        # Rebuild the cutter queue so queued jobs pick up the new offsets
+        self.jobs_changed.emit()
         self._update_preview_label()
+
+    def _refresh_row_duration(self, row: int):
+        dur_idx = self._model.index(row, SegmentTableModel.COL_DUR)
+        self._model.dataChanged.emit(dur_idx, dur_idx, [Qt.DisplayRole])
+
+    def apply_offsets_for_range(self, source_path: str, start: float, end: float,
+                                off_s: float, off_e: float):
+        """Store offsets tuned in the Cutter tab back onto the matching row.
+
+        The editor owns the offsets, so without this write-back the next
+        editor-driven queue rebuild would wipe them.
+        """
+        if source_path != self._source_path:
+            return
+        for row, seg in enumerate(self._model.segments):
+            if abs(seg.start - start) < 0.001 and abs(seg.end - end) < 0.001:
+                if (off_s, off_e) == (0, 0):
+                    self._row_offsets.pop(row, None)
+                else:
+                    self._row_offsets[row] = (off_s, off_e)
+                self._refresh_row_duration(row)
+                if self._current_row() == row:
+                    self._sync_offset_controls()
+                    self._update_preview_label()
+                break
 
     def _update_preview_label(self):
         """Show adjusted time range for the current segment (without playing)."""
@@ -1076,11 +1139,8 @@ class EditorTab(QWidget):
         if not seg:
             self.preview_label.setText("")
             return
-        off_s = self.offset_start_spin.value()
-        off_e = self.offset_end_spin.value()
-        _, adj_s, adj_e = _apply_padding(seg.text, seg.start, seg.end)
-        adj_s = max(0.0, adj_s + off_s / 1000.0)
-        adj_e = adj_e + off_e / 1000.0
+        off_s, off_e = self._offsets_for_row(current.row())
+        _, adj_s, adj_e = resolve_range(seg.text, seg.start, seg.end, off_s, off_e)
         self.preview_label.setText(
             f"{fmt_ts(adj_s)} → {fmt_ts(adj_e)} ({adj_e - adj_s:.1f}s)"
         )

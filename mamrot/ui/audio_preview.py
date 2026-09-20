@@ -6,7 +6,7 @@ import tempfile
 import threading
 from typing import Optional
 
-from ..core.cutter import cut_audio, _apply_padding, _find_ffmpeg
+from ..core.cutter import cut_audio, resolve_range, _find_ffmpeg
 
 
 class AudioPreview:
@@ -32,10 +32,10 @@ class AudioPreview:
 
         def _do():
             try:
-                # Apply padding markers
-                _, adj_start, adj_end = _apply_padding(text, start, end)
-                adj_start = max(0.0, adj_start + offset_start_ms / 1000.0)
-                adj_end = adj_end + offset_end_ms / 1000.0
+                # Same resolver the export uses — preview can never drift
+                _, adj_start, adj_end = resolve_range(
+                    text, start, end, offset_start_ms, offset_end_ms,
+                )
 
                 # Extract to temp WAV
                 tmp = tempfile.NamedTemporaryFile(
