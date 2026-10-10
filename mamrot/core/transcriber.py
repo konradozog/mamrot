@@ -10,6 +10,64 @@ from .models import (
 )
 
 
+def collect_chunks(audio, chunks, sampling_rate=16000, max_duration=float("inf")):
+    """faster-whisper's `vad.collect_chunks` (1.1.0 - 1.2.1) with the same
+    output, minus its quadratic cost.
+
+    Upstream grows the speech audio by one `np.concatenate` per VAD chunk, so
+    every chunk copies all the speech before it. With thousands of chunks
+    (an 11 h recording has ~7700) that alone takes ~17 min before the first
+    segment appears. Here the slices are collected in a list and concatenated
+    once per output chunk.
+    """
+    import numpy as np
+
+    if not chunks:
+        return [np.array([], dtype=np.float32)], [
+            {"offset": 0, "duration": 0, "segments": []}
+        ]
+
+    audio_chunks = []
+    chunks_metadata = []
+    pieces = []
+    segments = []
+    current = 0
+    total = 0
+
+    def _flush():
+        audio_chunks.append(
+            np.concatenate(pieces) if pieces else np.array([], dtype=np.float32)
+        )
+        chunks_metadata.append({
+            "offset": total / sampling_rate,
+            "duration": current / sampling_rate,
+            "segments": segments,
+        })
+
+    for chunk in chunks:
+        length = chunk["end"] - chunk["start"]
+        if current + length > max_duration * sampling_rate:
+            _flush()
+            total += current
+            # As upstream: a chunk that opens a new output chunk is not
+            # listed in that chunk's segments.
+            pieces, segments, current = [], [], 0
+        else:
+            segments.append(chunk)
+        pieces.append(audio[chunk["start"]:chunk["end"]])
+        current += length
+
+    _flush()
+    return audio_chunks, chunks_metadata
+
+
+def _install_linear_collect_chunks() -> None:
+    """Make `WhisperModel.transcribe` use the linear `collect_chunks`."""
+    import faster_whisper.transcribe
+
+    faster_whisper.transcribe.collect_chunks = collect_chunks
+
+
 class TranscriberEngine:
     """Wraps faster-whisper. Runs transcription in a background thread."""
 
@@ -56,6 +114,7 @@ class TranscriberEngine:
 
         from faster_whisper import WhisperModel
 
+        _install_linear_collect_chunks()
         self._model = WhisperModel(model_name, device=device, compute_type=compute_type)
         self._model_name = model_name
         self._device = device
