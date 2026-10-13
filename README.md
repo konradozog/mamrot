@@ -11,7 +11,7 @@ Powered by **faster-whisper** + **ffmpeg**, wrapped in a **PySide6** (Qt6) inter
 
 - **Batch transcription** — add multiple files, transcribe all at once
 - **Model selection** — tiny / base / small / medium / large-v3
-- **Language** — auto-detect or pick manually (25+ languages)
+- **Language** — auto-detect or pick manually (23 languages)
 - **Fragment mode** — transcribe only a time range
 - **Subtitle export** — SRT, VTT, CSV, JSON
 - **Transcript editor** — click any segment to edit in-place, split with Enter, merge with Ctrl+Backspace — works like a text editor, but every line has a timestamp
